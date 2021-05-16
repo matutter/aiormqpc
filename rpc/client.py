@@ -1,12 +1,15 @@
+import importlib
 import logging
+import sys
 import uuid
 from asyncio.futures import Future
-from typing import Any, Awaitable, Callable, Dict, List, Type, get_type_hints
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Type, Union, get_type_hints
 
 import aiormq
 from aiormq.abc import DeliveredMessage
 from aiormq.connection import Connection
 from pamqp.commands import Basic, Channel, Queue
+from pamqp.header import BasicProperties
 from pydantic import Field
 from pydantic.main import BaseModel
 
@@ -18,10 +21,10 @@ def UUID4Str() -> str:
 
 class RpcMessage(BaseModel):
   id: str = Field(default_factory=UUID4Str)
+  reply_to: Optional[str]
   method: str
   source: str
   type: str
-  data: Any
 
 
 class RpcBase:
@@ -32,14 +35,12 @@ class RpcBase:
   queue_name: str
   message_types: Dict[str, Type[BaseModel]]
 
-  def __init__(self, id:str = None, queue_name:str = 'rpc', models: List[Type[BaseModel]] = None) -> None:
+  def __init__(self, id:str = None, queue_name:str = 'rpc') -> None:
     self._connection = None
     self._channel = None
     self.id = id or UUID4Str()
     self.message_types = dict()
     self.queue_name = queue_name
-    for model in models:
-      self.add_model(model)
 
 
   @property
@@ -47,9 +48,54 @@ class RpcBase:
     return bool(self._connection and self._channel)
 
 
-  def add_model(self, model_type:Type[BaseModel]) -> str:
-    type_name: str = model_type.__qualname__
-    self.message_types[type_name] = model_type
+  def _read_properties(self, message: DeliveredMessage) -> RpcMessage:
+    properties: BasicProperties = message.header.properties
+    msg = RpcMessage(**properties.headers)
+    if not msg.reply_to:
+      msg.reply_to = properties.reply_to
+    return msg
+
+
+  def _write_properties(self, msg: RpcMessage, reply_to:str = None) -> BasicProperties:
+    headers = msg.dict(exclude={'reply_to'})
+    content_type:str = 'application/json'
+    if msg.type == 'bytes':
+      content_type = 'application/octet-stream'
+    props = Basic.Properties(content_type=content_type, headers=headers, reply_to=reply_to)
+    return props
+
+
+  def _get_typename(self, cls: Type[BaseModel]):
+    module = cls.__module__
+    type_name = cls.__qualname__
+    if module == 'builtins':
+      return type_name
+    return f'{module}.{type_name}'
+
+
+  def _get_class_by_typename(self, type_name: str) -> Optional[Type[BaseModel]]:
+    if type_name in self.message_types:
+      return self.message_types[type_name]
+
+    if '.' not in type_name:
+      return globals().get(type_name, None)
+
+    cls: Type = None
+    module, type_name = type_name.rsplit('.', 1)
+    if module not in sys.modules:
+      log.debug('Loading module %s for RPC type %s', module, type_name)
+      importlib.import_module(module)
+
+    log.debug('Lookup RPC type %s in module %s', type_name, module)
+    cls = getattr(sys.modules[module], type_name, None)
+    if cls and issubclass(cls, BaseModel):
+      self.add_model(cls)
+    return cls
+
+
+  def add_model(self, message_type:Type[BaseModel]) -> str:
+    type_name: str = self._get_typename(message_type)
+    self.message_types[type_name] = message_type
     return type_name
 
 
@@ -74,18 +120,25 @@ class RpcBase:
       self._channel = None
 
 
-  def process_message(self, msg: RpcMessage) -> None:
-    cls: Type[BaseModel] = self.message_types.get(msg.type)
-    if msg.data and cls is not None:
-      msg.data = cls.parse_obj(msg.data)
+  def encode_message(self, msg: RpcMessage, message:Union[BaseModel, bytes]) -> bytes:
+    if msg.type == 'bytes':
+      return message
+    return message.json().encode()
+
+
+  def decode_message(self, msg: RpcMessage, message:Union[str, bytes]) -> Union[BaseModel, bytes]:
+    if msg.type == 'bytes':
+      return message
+    cls = self._get_class_by_typename(msg.type)
+    return cls.parse_raw(message)
 
 
 class RpcServer(RpcBase):
 
   methods: Dict[str, Callable[[BaseModel], Awaitable[None]]]
 
-  def __init__(self, id:str = None, queue_name:str = 'rpc', models=None) -> None:
-    super().__init__(id, queue_name, models=models)
+  def __init__(self, id:str = None, queue_name:str = 'rpc') -> None:
+    super().__init__(id, queue_name)
     self.methods = dict()
 
   async def connect(self, dsn:str = "amqp://guest:guest@localhost/") -> None:
@@ -112,27 +165,25 @@ class RpcServer(RpcBase):
   async def on_call(self, message: DeliveredMessage):
     await message.channel.basic_ack(message.delivery.delivery_tag)
 
-    reply_to: str = getattr(message.header.properties, 'reply_to', None)
-    msg: RpcMessage = RpcMessage.parse_raw(message.body)
+    try:
+      msg: RpcMessage = self._read_properties(message)
 
-    if msg.method not in self.methods:
-      log.warning('Cannot process RPC method %s, method unknown', msg.method)
-      return
+      if msg.method not in self.methods:
+        log.warning('Cannot process RPC method %s, method unknown', msg.method)
+        return
 
-    self.process_message(msg)
+      data = self.decode_message(msg, message.body)
+      result = await self.methods[msg.method](data)
+      msg.type = self._get_typename(type(result))
+      await self._send_result(msg, result)
+    except:
+      log.exception('Error handling call')
 
-    res = await self.methods[msg.method](msg.data)
-    if reply_to is not None:
-      await self._send_result(reply_to, msg, res)
-
-
-  async def _send_result(self, routing_key: str, request: RpcMessage, model: BaseModel) -> None:
-    model_type = type(model).__qualname__
-    method = request.method + '_result'
-    msg = RpcMessage(id=request.id, source=self.id, method=method, type=model_type, data=model)
-    data = msg.json().encode()
-    props = Basic.Properties(content_type='application/json')
-    await self._channel.basic_publish(data, routing_key=routing_key, properties=props)
+  async def _send_result(self, msg: RpcMessage, message: Union[BaseModel, bytes]) -> None:
+    props = self._write_properties(msg)
+    data = self.encode_message(msg, message)
+    log.debug('Replying to=%s, method=%s, type=%s', msg.reply_to, msg.method, msg.type)
+    await self._channel.basic_publish(data, routing_key=msg.reply_to, properties=props)
 
 
 class RpcClient(RpcBase):
@@ -140,8 +191,8 @@ class RpcClient(RpcBase):
   callback_queue_name: str
   _futures: Dict[str, Future]
 
-  def __init__(self, id:str = None, queue_name:str = 'rpc', models=None) -> None:
-    super().__init__(id, queue_name, models=models)
+  def __init__(self, id:str = None, queue_name:str = 'rpc') -> None:
+    super().__init__(id, queue_name)
     self._futures = dict()
 
 
@@ -160,26 +211,25 @@ class RpcClient(RpcBase):
   async def on_result(self, message: DeliveredMessage):
     await message.channel.basic_ack(message.delivery.delivery_tag)
 
-    msg: RpcMessage = RpcMessage.parse_raw(message.body)
+    msg: RpcMessage = self._read_properties(message)
 
     if msg.id not in self._futures:
       log.warning('Cannot resolve message result %s, unknown message ID', msg.id)
       return
 
-    self.process_message(msg)
     future = self._futures.pop(msg.id)
-    future.set_result(msg.data)
+    message = self.decode_message(msg, message.body)
+    future.set_result(message)
 
 
-  async def call(self, method: str, model: BaseModel):
-    model_type = type(model).__qualname__
-    msg = RpcMessage(source=self.id, method=method, type=model_type, data=model)
-    data = msg.json().encode()
-    props = Basic.Properties(
-      content_type='application/json',
-      reply_to=self.callback_queue_name)
+  async def call(self, method: str, message: Union[BaseModel, bytes]):
+    msg = RpcMessage(source=self.id, method=method, type=self._get_typename(type(message)))
+    props = self._write_properties(msg, reply_to=self.callback_queue_name)
+    data = self.encode_message(msg, message)
 
     future = Future()
     self._futures[msg.id] = future
+
+    log.debug('Sending queue=%s, id=%s, method=%s', self.queue_name, msg.id, msg.method)
     await self._channel.basic_publish(data, routing_key=self.queue_name, properties=props)
     return await future
