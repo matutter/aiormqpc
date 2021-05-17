@@ -1,6 +1,9 @@
+import asyncio
+from asyncio.exceptions import CancelledError
 import sys
 import logging
 from typing import List, Type
+from aiormq import exceptions
 
 from pydantic.main import BaseModel
 from rpc import models
@@ -14,7 +17,7 @@ logging.getLogger('aiormq.connection').setLevel(logging.WARNING)
 logging.getLogger('asyncio').setLevel(logging.WARNING)
 import coloredlogs
 
-coloredlogs.install(logging.DEBUG)
+coloredlogs.install(logging.DEBUG, fmt='%(filename)s:%(lineno)d %(levelname)s %(message)s')
 
 @pytest.fixture
 def unloaded_models():
@@ -113,3 +116,17 @@ async def test_basic_rpc_complex_data_1(client: RpcClient, server: RpcServer):
   obj = NestedObject(id='nested', bin=BinaryObj(id='bin', data=b'xxx'), conf=Config(id='conf', secret='yyy'))
   res: NestedObject = await client.call('my_callback', obj)
   assert res.id == 'updated'
+
+
+
+async def test_call_timeout(client: RpcClient, server: RpcServer):
+  print('client', client.id, 'server', server.id)
+
+  async def my_callback(data: bytes) -> bytes:
+    print('received', data)
+    await asyncio.sleep(10)
+    return b''
+
+  server.add_method(my_callback)
+  with pytest.raises(asyncio.exceptions.TimeoutError):
+    await client.call('my_callback', b'xxx', call_timeout=0.4)

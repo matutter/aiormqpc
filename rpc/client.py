@@ -1,4 +1,5 @@
 import asyncio
+from asyncio.exceptions import CancelledError
 import importlib
 import logging
 import sys
@@ -179,6 +180,8 @@ class RpcServer(RpcBase):
       result = await self.methods[msg.method](data)
       msg.type = self._get_typename(type(result))
       await self._send_result(msg, result)
+    except CancelledError:
+      log.warning('Procedure cancelled id=%s, method=%s, source=%s', msg.id, msg.method, msg.source)
     except:
       log.exception('Error handling call')
 
