@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import logging
 import sys
@@ -12,6 +13,7 @@ from pamqp.commands import Basic, Channel, Queue
 from pamqp.header import BasicProperties
 from pydantic import Field
 from pydantic.main import BaseModel
+import msgpack
 
 log = logging.getLogger(__name__)
 
@@ -123,14 +125,14 @@ class RpcBase:
   def encode_message(self, msg: RpcMessage, message:Union[BaseModel, bytes]) -> bytes:
     if msg.type == 'bytes':
       return message
-    return message.json().encode()
+    return msgpack.packb(message.dict())
 
 
   def decode_message(self, msg: RpcMessage, message:Union[str, bytes]) -> Union[BaseModel, bytes]:
     if msg.type == 'bytes':
       return message
     cls = self._get_class_by_typename(msg.type)
-    return cls.parse_raw(message)
+    return cls.parse_obj(msgpack.unpackb(message))
 
 
 class RpcServer(RpcBase):
@@ -140,6 +142,7 @@ class RpcServer(RpcBase):
   def __init__(self, id:str = None, queue_name:str = 'rpc') -> None:
     super().__init__(id, queue_name)
     self.methods = dict()
+
 
   async def connect(self, dsn:str = "amqp://guest:guest@localhost/") -> None:
     if self.is_connected:
@@ -179,6 +182,7 @@ class RpcServer(RpcBase):
     except:
       log.exception('Error handling call')
 
+
   async def _send_result(self, msg: RpcMessage, message: Union[BaseModel, bytes]) -> None:
     props = self._write_properties(msg)
     data = self.encode_message(msg, message)
@@ -190,10 +194,12 @@ class RpcClient(RpcBase):
 
   callback_queue_name: str
   _futures: Dict[str, Future]
+  call_timeout: float
 
-  def __init__(self, id:str = None, queue_name:str = 'rpc') -> None:
+  def __init__(self, id:str = None, queue_name:str = 'rpc', call_timeout: float = 30.0) -> None:
     super().__init__(id, queue_name)
     self._futures = dict()
+    self.call_timeout = call_timeout
 
 
   async def connect(self, dsn:str = "amqp://guest:guest@localhost/") -> None:
@@ -222,7 +228,7 @@ class RpcClient(RpcBase):
     future.set_result(message)
 
 
-  async def call(self, method: str, message: Union[BaseModel, bytes]):
+  async def call(self, method: str, message: Union[BaseModel, bytes], call_timeout: Optional[float] = None):
     msg = RpcMessage(source=self.id, method=method, type=self._get_typename(type(message)))
     props = self._write_properties(msg, reply_to=self.callback_queue_name)
     data = self.encode_message(msg, message)
@@ -232,4 +238,4 @@ class RpcClient(RpcBase):
 
     log.debug('Sending queue=%s, id=%s, method=%s', self.queue_name, msg.id, msg.method)
     await self._channel.basic_publish(data, routing_key=self.queue_name, properties=props)
-    return await future
+    return await asyncio.wait_for(future, call_timeout or self.call_timeout)
