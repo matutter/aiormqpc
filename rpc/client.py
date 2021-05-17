@@ -1,20 +1,21 @@
 import asyncio
-from asyncio.exceptions import CancelledError
 import importlib
 import logging
 import sys
 import uuid
+from asyncio.exceptions import CancelledError
 from asyncio.futures import Future
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Type, Union, get_type_hints
+from typing import (Awaitable, Callable, Dict, Optional, Type, Union,
+                    get_type_hints)
 
 import aiormq
+import msgpack
 from aiormq.abc import DeliveredMessage
 from aiormq.connection import Connection
 from pamqp.commands import Basic, Channel, Queue
 from pamqp.header import BasicProperties
 from pydantic import Field
 from pydantic.main import BaseModel
-import msgpack
 
 log = logging.getLogger(__name__)
 
@@ -61,9 +62,8 @@ class RpcBase:
 
   def _write_properties(self, msg: RpcMessage, reply_to:str = None) -> BasicProperties:
     headers = msg.dict(exclude={'reply_to'})
-    content_type:str = 'application/json'
-    if msg.type == 'bytes':
-      content_type = 'application/octet-stream'
+    # everything is msgpack encoded
+    content_type:str = 'application/x-msgpack'
     props = Basic.Properties(content_type=content_type, headers=headers, reply_to=reply_to)
     return props
 
