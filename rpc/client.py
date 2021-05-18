@@ -7,6 +7,7 @@ from asyncio.exceptions import CancelledError
 from asyncio.futures import Future
 from typing import (Awaitable, Callable, Dict, Optional, Type, Union,
                     get_type_hints)
+import functools
 
 import aiormq
 import msgpack
@@ -21,6 +22,13 @@ log = logging.getLogger(__name__)
 
 def UUID4Str() -> str:
   return uuid.uuid4().hex
+
+
+class ReturnFuture(Future):
+  return_type: str
+  def __init__(self, return_type: str) -> None:
+      super().__init__()
+      self.return_type = return_type
 
 
 class RpcMessage(BaseModel):
@@ -145,6 +153,13 @@ class RpcServer(RpcBase):
     self.methods = dict()
 
 
+  def method(self, name:str = None) -> None:
+    def rpc_method_decorator(func:Callable) -> Callable:
+      self.add_method(func, name=name)
+      return func
+    return rpc_method_decorator
+
+
   async def connect(self, dsn:str = "amqp://guest:guest@localhost/") -> None:
     if self.is_connected:
       return
@@ -205,6 +220,22 @@ class RpcClient(RpcBase):
     self.call_timeout = call_timeout
 
 
+  def method(self, name:str = None, call_timeout: float = None, result_type:Type = None) -> None:
+    def rpc_call_generator(func:Callable) -> Callable:
+      nonlocal name
+      nonlocal result_type
+
+      call_name = name or func.__name__
+
+      if result_type is None:
+        result_type = get_type_hints(func).get('return')
+      if result_type:
+        result_type = self._get_typename(result_type)
+
+      return functools.partial(self.call, call_name, call_timeout=call_timeout, result_type=result_type)
+    return rpc_call_generator
+
+
   async def connect(self, dsn:str = "amqp://guest:guest@localhost/") -> None:
     if self.is_connected:
       return
@@ -226,17 +257,29 @@ class RpcClient(RpcBase):
       log.warning('Cannot resolve message result %s, unknown message ID', msg.id)
       return
 
-    future = self._futures.pop(msg.id)
+    future: ReturnFuture = self._futures.pop(msg.id)
+    if future.return_type is not None:
+      # Don't even decode the message, just set the exception and return
+      if future.return_type != msg.type:
+        log.error('Unexpected RPC result type %s, expected %s, method=%s', msg.type, future.return_type, msg.method)
+        future.set_exception(TypeError(f'Invalid object type, expected {future.return_type} got {msg.type}'))
+        return
+
     message = self.decode_message(msg, message.body)
     future.set_result(message)
 
 
-  async def call(self, method: str, message: Union[BaseModel, bytes], call_timeout: Optional[float] = None):
+  async def call(self,
+    method: str,
+    message: Union[BaseModel, bytes],
+    result_type: Type[BaseModel] = None,
+    call_timeout: Optional[float] = None):
+
     msg = RpcMessage(source=self.id, method=method, type=self._get_typename(type(message)))
     props = self._write_properties(msg, reply_to=self.callback_queue_name)
     data = self.encode_message(msg, message)
 
-    future = Future()
+    future = ReturnFuture(result_type)
     self._futures[msg.id] = future
 
     log.debug('Sending queue=%s, id=%s, method=%s', self.queue_name, msg.id, msg.method)

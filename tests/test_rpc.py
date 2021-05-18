@@ -130,3 +130,35 @@ async def test_call_timeout(client: RpcClient, server: RpcServer):
   server.add_method(my_callback)
   with pytest.raises(asyncio.exceptions.TimeoutError):
     await client.call('my_callback', b'xxx', call_timeout=0.4)
+
+
+async def test_rpc_decorators(client: RpcClient, server: RpcServer):
+
+  @server.method(name='func123')
+  async def my_method(conf: Config) -> Config:
+    return Config(id='xyz', secret=conf.secret)
+
+  @client.method()
+  async def func123(conf: Config) -> Config: pass
+
+  c = Config(id='abc', secret='123')
+  res = await func123(c)
+
+  assert res.id == 'xyz'
+  assert res.secret == c.secret
+
+
+async def test_rpc_type_checking(client: RpcClient, server: RpcServer):
+
+  @server.method(name='func123')
+  async def my_method(conf: Config) -> Config:
+    return BinaryObj(id='xyz', data=b'123')
+
+  @client.method()
+  async def func123(conf: Config) -> Config: pass
+
+  c = Config(id='abc', secret='123')
+
+  with pytest.raises(TypeError):
+    res = await func123(c)
+
