@@ -1,164 +1,101 @@
 import asyncio
-from asyncio.exceptions import CancelledError
-import sys
 import logging
-from typing import List, Type
-from aiormq import exceptions
+from os import wait
 
-from pydantic.main import BaseModel
-from rpc import models
-from rpc.models import BinaryObj, Config, ConfigResult, NestedObject
-from _pytest.fixtures import SubRequest
+import coloredlogs
 import pytest
-from rpc.client import RpcClient, RpcServer
+from _pytest.fixtures import SubRequest
+from pydantic.main import BaseModel
+from rpc import RpcFactory, RpcProvider, endpoint
+from rpc.rpcfactory import RpcError
+
+coloredlogs.install(logging.DEBUG)
+logging.getLogger('aiormq.connection').setLevel(logging.ERROR)
 
 pytestmark = pytest.mark.asyncio
-logging.getLogger('aiormq.connection').setLevel(logging.WARNING)
-logging.getLogger('asyncio').setLevel(logging.WARNING)
-import coloredlogs
 
-coloredlogs.install(logging.DEBUG, fmt='%(filename)s:%(lineno)d %(levelname)s %(message)s')
+
+class Input(BaseModel):
+  arg: str
+
+
+class Obj(BaseModel):
+  arg: int
+
+
+class Return(BaseModel):
+  value: bytes
+
+
+class MyRpc:
+  rpc: RpcProvider
+
+  def server_arg(self, arg1):
+    print(arg1)
+
+  def server_data(self, data):
+    print(data)
+
+  def server_other(self, other):
+    print(other)
+
+  def server_o(self, o):
+    print(o)
+
+  @endpoint
+  async def func1(self, arg1: str, data: Input, other: str = 2, o: Obj = None) -> Return:
+    print('Received', arg1, data, other, o)
+    self.server_arg(arg1)
+    self.server_data(data)
+    self.server_other(other)
+    self.server_o(o)
+    value: bytes = ''.join(list(reversed(data.arg))).encode()
+    ret: Return = Return(value=value)
+    print('Returned', ret)
+    return ret
+
 
 @pytest.fixture
-def unloaded_models():
-  if 'rpc.models' in sys.modules:
-    del sys.modules['rpc.models']
-    print('delete python module cache')
+async def cleanup():
+  holder = []
+  yield holder.append
+  for func in holder:
+    await func()
 
+async def test_rpc_factory_1(cleanup):
+  factory = RpcFactory()
+  client = factory.get_client(MyRpc)
+  server = factory.get_server(MyRpc)
+  await client.rpc.connect()
+  print('client connected')
+  await server.rpc.connect()
+  print('server connected')
 
-@pytest.fixture
-async def client() -> RpcClient:
-  cli: RpcClient = RpcClient()
-  await cli.connect()
-  yield cli
-  await cli.disconnect()
+  async def disconnect():
+    await client.rpc.disconnect()
+    await server.rpc.disconnect()
+  cleanup(disconnect)
 
-
-@pytest.fixture
-async def server() -> RpcClient:
-  cli: RpcServer = RpcServer()
-  await cli.connect()
-  yield cli
-  await cli.disconnect()
-
-
-async def test_connect(client: RpcClient, server: RpcServer):
-  assert client.is_connected
-  assert server.is_connected
-
-
-async def test_basic_rpc_1(client: RpcClient, server: RpcServer):
-  print('client', client.id, 'server', server.id)
-
-  async def my_callback(conf:Config) -> ConfigResult:
-    print('received', conf)
-    result = ConfigResult(status_code=200)
-    print('sending', result)
-    return result
-
-  server.add_method(my_callback)
-  server.add_method(my_callback, name='test')
-  config: Config = Config(id='xxx', secret='yyy')
-  result: ConfigResult = await client.call('test', config)
-  assert result.status_code == 200
-  result: ConfigResult = await client.call('my_callback', config)
-  assert result.status_code == 200
-
-
-async def test_basic_rpc_binary_data(client: RpcClient, server: RpcServer, unloaded_models):
-  print('client', client.id, 'server', server.id)
-
-  async def my_callback(conf:Config) -> bytes:
-    print('received', conf)
-    result = conf.secret.encode()
-    print('sending', result)
-    return result
-
-  server.add_method(my_callback)
-  config: Config = Config(id='xxx', secret='yyy')
-  result: ConfigResult = await client.call('my_callback', config)
-  assert result == b'yyy'
-
-  async def bin_callback(data: BinaryObj) -> BinaryObj:
-    print('received', data)
-    data.data = b'bbb\0\0\0'
-    result = data
-    print('sending', result)
-    return result
-
-  server.add_method(bin_callback)
-  data: BinaryObj = BinaryObj(id='xxx', data=b'aaa')
-  result: BinaryObj = await client.call('bin_callback', data)
-  assert result.data == b'bbb\0\0\0'
-
-async def test_msgpack():
-  import msgpack
-  conf = BinaryObj(id='xxx', data=b'\0yyy')
-  d = conf.dict()
-  print(d)
-  raw = msgpack.packb(d)
-  print(raw)
-  o = BinaryObj.parse_obj(msgpack.unpackb(raw))
-  print(o)
-
-
-async def test_basic_rpc_complex_data_1(client: RpcClient, server: RpcServer):
-  print('client', client.id, 'server', server.id)
-
-  async def my_callback(obj: NestedObject) -> bytes:
-    print('received', obj)
-    obj.id = 'updated'
-    result = obj
-    print('sending', result)
-    return result
-
-  server.add_method(my_callback)
-  obj = NestedObject(id='nested', bin=BinaryObj(id='bin', data=b'xxx'), conf=Config(id='conf', secret='yyy'))
-  res: NestedObject = await client.call('my_callback', obj)
-  assert res.id == 'updated'
+  ret = await client.func1('abc', Input(arg='123'), other=1)
+  assert ret.value == b'321'
+  ret = await client.func1('abc', Input(arg='xyz'))
+  assert ret.value == b'zyx'
+  ret = await client.func1('abc', Input(arg='xyz'))
+  assert ret.value == b'zyx'
+  ret = await client.func1('abc', Input(arg='321'), o=Obj(arg=123))
+  assert ret.value == b'123'
+  with pytest.raises(RpcError):
+    ret = await client.func1(Input(arg='321'), o=Obj(arg=123))
 
 
 
-async def test_call_timeout(client: RpcClient, server: RpcServer):
-  print('client', client.id, 'server', server.id)
-
-  async def my_callback(data: bytes) -> bytes:
-    print('received', data)
-    await asyncio.sleep(10)
-    return b''
-
-  server.add_method(my_callback)
-  with pytest.raises(asyncio.exceptions.TimeoutError):
-    await client.call('my_callback', b'xxx', call_timeout=0.4)
-
-
-async def test_rpc_decorators(client: RpcClient, server: RpcServer):
-
-  @server.method(name='func123')
-  async def my_method(conf: Config) -> Config:
-    return Config(id='xyz', secret=conf.secret)
-
-  @client.method()
-  async def func123(conf: Config) -> Config: pass
-
-  c = Config(id='abc', secret='123')
-  res = await func123(c)
-
-  assert res.id == 'xyz'
-  assert res.secret == c.secret
-
-
-async def test_rpc_type_checking(client: RpcClient, server: RpcServer):
-
-  @server.method(name='func123')
-  async def my_method(conf: Config) -> Config:
-    return BinaryObj(id='xyz', data=b'123')
-
-  @client.method()
-  async def func123(conf: Config) -> Config: pass
-
-  c = Config(id='abc', secret='123')
+async def test_rpc_factory_2():
 
   with pytest.raises(TypeError):
-    res = await func123(c)
+    class MyUnsupportedType:
+      pass
 
+    class AnRpcClass:
+      @endpoint
+      async def func(var: str, unsupported: MyUnsupportedType):
+        pass
