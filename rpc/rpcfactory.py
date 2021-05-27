@@ -3,7 +3,7 @@ import logging
 from asyncio.futures import Future
 from inspect import FullArgSpec, getfullargspec
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Type,
-                    TypeVar)
+                    TypeVar, get_origin)
 from uuid import uuid1
 
 import aiormq
@@ -259,7 +259,9 @@ class Endpoint:
         self.arg_models[i] = annotations.pop(arg)
 
   def _check_type_support(self, type_: Type):
-    return issubclass(type_, (BaseModel, str, int, float, str, bytes, bool))
+    if type_ is None: return True
+    if not isinstance(type_, type): return False
+    return issubclass(type_, (BaseModel, str, int, float, str, bytes, bool, list))
 
   async def send(self, *args: Any, **kwargs: Any) -> Any:
     """
@@ -308,7 +310,7 @@ class Endpoint:
         kwargs[key] = cls.parse_obj(kwargs[key])
 
     result = await self.func(*args, **kwargs)
-    if issubclass(self.return_type, BaseModel):
+    if self.return_type and issubclass(self.return_type, BaseModel):
       result = result.dict()
 
     response = RpcMessage(id=msg.id, name=msg.name, result=result)

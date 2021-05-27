@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from os import wait
+from typing import List
 
 import coloredlogs
 import pytest
@@ -41,6 +42,21 @@ class MyRpc:
 
   def server_o(self, o):
     print(o)
+
+  @endpoint
+  async def noreturn(self, arg1: str = None) -> None:
+    print('Returned', None)
+    return None
+
+  if 0:
+    # Not supported (yet)
+    @endpoint
+    async def returnlist1(self, arg1: str = None) -> List[str]:
+      ret = []
+      if arg1:
+        ret = arg1.split()
+      print('Returned', ret)
+      return ret
 
   @endpoint
   async def func1(self, arg1: str, data: Input, other: str = 2, o: Obj = None) -> Return:
@@ -87,7 +103,16 @@ async def test_rpc_factory_1(cleanup):
   with pytest.raises(RpcError):
     ret = await client.func1(Input(arg='321'), o=Obj(arg=123))
 
+  ret = await client.func1(None, Input(arg='321'), o=None)
+  assert ret.value == b'123'
 
+  ret = await client.noreturn(None)
+  assert ret == None
+
+  if 0:
+    # Not supported (yet)
+    ret = await client.returnlist1('abc')
+    assert ret == ['a', 'b', 'c']
 
 async def test_rpc_factory_2():
 
