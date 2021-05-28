@@ -65,7 +65,7 @@ await client.rpc.connect(dsn="amqp://guest:guest@localhost/")
 
 Invoke methods on the client as if it were an instance of the class.
 
-```
+```python
 file1 = FileData(name='file1', data=b'1234')
 size = await client.upload_file(file1)
 ```
