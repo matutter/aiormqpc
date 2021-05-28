@@ -143,10 +143,10 @@ jobs:
 
     services:
       rabbitmq:
-        image: rabbitmq:alpine
+        image: rabbitmq:latest
         ports:
-          - 5672:5672
-          - 15672:15672
+        - 5672/tcp
+        options: --health-cmd "rabbitmqctl node_health_check" --health-interval 10s --health-timeout 5s --health-retries 5
 
     steps:
     - uses: actions/checkout@v2
