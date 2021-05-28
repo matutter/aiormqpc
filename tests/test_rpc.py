@@ -3,9 +3,8 @@ from typing import List
 
 import coloredlogs
 import pytest
+from aiormqpc import RpcError, RpcFactory, RpcProvider, endpoint
 from pydantic.main import BaseModel
-from aiormqpc import RpcFactory, RpcProvider, endpoint
-from aiormqpc.rpcfactory import RpcError
 
 coloredlogs.install(logging.DEBUG)
 logging.getLogger('aiormq.connection').setLevel(logging.ERROR)
