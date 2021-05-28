@@ -139,7 +139,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TEST_RMQ_DSN: amqp://guest:guest@rabbitmq/
+      TEST_RMQ_DSN: amqp://localhost:${{ job.services.rabbitmq.ports[5672] }}
 
     services:
       rabbitmq:
