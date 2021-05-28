@@ -3,6 +3,7 @@ from typing import List
 
 import coloredlogs
 import pytest
+import os
 from aiormqpc import RpcError, RpcFactory, RpcProvider, endpoint
 from pydantic.main import BaseModel
 
@@ -11,6 +12,7 @@ logging.getLogger('aiormq.connection').setLevel(logging.ERROR)
 
 pytestmark = pytest.mark.asyncio
 
+TEST_RMQ_DSN = os.environ.get("TEST_RMQ_DSN", "amqp://guest:guest@localhost/")
 
 class Input(BaseModel):
   arg: str
@@ -79,9 +81,9 @@ async def test_rpc_factory_1(cleanup):
   factory = RpcFactory()
   client = factory.get_client(MyRpc)
   server = factory.get_server(MyRpc)
-  await client.rpc.connect()
+  await client.rpc.connect(dsn=TEST_RMQ_DSN)
   print('client connected')
-  await server.rpc.connect()
+  await server.rpc.connect(dsn=TEST_RMQ_DSN)
   print('server connected')
 
   async def disconnect():
