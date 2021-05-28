@@ -1,11 +1,8 @@
-import asyncio
 import logging
-from os import wait
 from typing import List
 
 import coloredlogs
 import pytest
-from _pytest.fixtures import SubRequest
 from pydantic.main import BaseModel
 from rpc import RpcFactory, RpcProvider, endpoint
 from rpc.rpcfactory import RpcError
@@ -78,6 +75,7 @@ async def cleanup():
   for func in holder:
     await func()
 
+
 async def test_rpc_factory_1(cleanup):
   factory = RpcFactory()
   client = factory.get_client(MyRpc)
@@ -114,7 +112,8 @@ async def test_rpc_factory_1(cleanup):
     ret = await client.returnlist1('abc')
     assert ret == ['a', 'b', 'c']
 
-async def test_rpc_factory_2():
+
+async def test_rpc_type_support_1():
 
   with pytest.raises(TypeError):
     class MyUnsupportedType:
