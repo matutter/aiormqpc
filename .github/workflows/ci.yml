@@ -75,8 +75,8 @@ jobs:
         name: [ "ubuntu-py36",
                 "ubuntu-py37",
                 "ubuntu-py38",
-                "ubuntu-py39"
-                "ubuntu-py310"
+                "ubuntu-py39",
+                "ubuntu-py310",
                 "ubuntu-py311"
                 ]
         include:
