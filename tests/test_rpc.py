@@ -81,8 +81,10 @@ async def test_rpc_factory_1(cleanup):
   factory = RpcFactory()
   client = factory.get_client(MyRpc)
   server = factory.get_server(MyRpc)
+  print('client connecting')
   await client.rpc.connect(dsn=TEST_RMQ_DSN)
   print('client connected')
+  print('server connecting')
   await server.rpc.connect(dsn=TEST_RMQ_DSN)
   print('server connected')
 

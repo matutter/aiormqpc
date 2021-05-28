@@ -165,7 +165,7 @@ jobs:
 
     - name: Test with coverage
       run: |
-        pytest --cov=aiormqpc
+        pytest --cov=aiormqpc -s
 
     - name: Generate coverage report
       run: coverage xml
